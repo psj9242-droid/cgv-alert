@@ -1,5 +1,6 @@
 /**
  * 24시간 클라우드 전용 모니터링 엔진
+ * - 오직 "신규 티켓 오픈"일 때만 알림 (취소표 알림 제외)
  * - 환경변수 기반 텔레그램 연동
  * - 클라우드 헬스체크용 경량 HTTP 서버 내장
  * - 365일 무중단 동작
@@ -8,7 +9,7 @@
 const http = require('http');
 const { getOpenDates, getSchedules, filterSchedules } = require('./cgv_api');
 
-// 설정값 (기본값으로 형준님의 봇 토큰 및 Chat ID 등록)
+// 설정값 (형준님의 봇 토큰 및 Chat ID)
 const CONFIG = {
   port: process.env.PORT || 3000,
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '8393220813:AAG8jvm-SRxu5c6PG_RkmaGLVtKRr0SCrUY',
@@ -45,12 +46,12 @@ async function sendTelegram(text) {
 
 async function checkCGV() {
   const timeStr = new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' });
-  console.log(`[${timeStr}] CGV 용산아이맥스 확인 중...`);
+  console.log(`[${timeStr}] CGV 용산아이맥스 오픈 감시 중...`);
 
   try {
     const openDates = await getOpenDates(CONFIG.siteNo);
 
-    // 1. 신규 날짜 오픈 확인
+    // 1. 신규 날짜 예매 오픈 감지 (새로운 날짜가 열렸을 때)
     if (knownDates.size > 0) {
       const newDates = openDates.filter(d => !knownDates.has(d));
       if (newDates.length > 0) {
@@ -60,8 +61,8 @@ async function checkCGV() {
     }
     openDates.forEach(d => knownDates.add(d));
 
-    // 2. 상영시간표 조회 (최근 4개 일자)
-    const datesToCheck = openDates.slice(0, 4);
+    // 2. 상영시간표 조회 (신규 상영 회차 오픈 감지)
+    const datesToCheck = openDates.slice(0, 5);
     for (const date of datesToCheck) {
       const schedules = await getSchedules(date, CONFIG.siteNo);
       const filtered = filterSchedules(schedules, {
@@ -74,17 +75,14 @@ async function checkCGV() {
         const prevSeats = knownScreenings.get(key);
 
         if (prevSeats === undefined) {
+          // 최초 서버 실행 이후에 "새롭게 추가된 상영 회차"만 신규 오픈으로 알림!
           if (knownScreenings.size > 0) {
-            // 신규 티켓 오픈!
             const msg = `🔥 *[티켓 오픈 감지!]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *잔여좌석*: ${s.remainingSeats}석\n\n👉 [CGV 예매 바로가기](https://cgv.co.kr/theaters?theaterCode=${CONFIG.siteNo})`;
             await sendTelegram(msg);
           }
-        } else if (prevSeats <= 0 && s.remainingSeats > 0) {
-          // 취소표 발생!
-          const msg = `✨ *[취소표 발생 알림!]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *현재 잔여*: ${s.remainingSeats}석\n\n👉 [CGV 예매 바로가기](https://cgv.co.kr/theaters?theaterCode=${CONFIG.siteNo})`;
-          await sendTelegram(msg);
         }
 
+        // 취소표 감지는 제외 (신규 오픈만 체크)
         knownScreenings.set(key, s.remainingSeats);
       }
     }
@@ -93,12 +91,13 @@ async function checkCGV() {
   }
 }
 
-// 헬스체크 웹 서버 (클라우드 인스턴스 유지용)
+// 헬스체크 웹 서버
 const server = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify({
     status: 'ONLINE',
     service: 'CGV Yongsan IMAX 24/7 Cloud Monitor',
+    mode: 'NEW_OPENING_ONLY (No Cancellation Alerts)',
     targetMovie: CONFIG.targetMovie,
     targetScreen: CONFIG.targetScreen,
     openDatesCount: knownDates.size,
@@ -109,9 +108,8 @@ const server = http.createServer((req, res) => {
 
 server.listen(CONFIG.port, async () => {
   console.log(`Cloud Monitor running on port ${CONFIG.port}`);
-  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 시작]*\n\n클라우드 서버에서 24시간 감시가 시작되었습니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n⏱️ 확인 주기: ${CONFIG.intervalSeconds}초\n\n컴퓨터가 꺼져 있어도 티켓이 열리면 이곳으로 즉시 알려드립니다.`);
+  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 가동]*\n\n클라우드 서버에서 24시간 감시 중입니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📢 모드: *신규 티켓 오픈 시에만 알림* (취소표 제외)\n\n컴퓨터가 꺼져 있어도 새로운 티켓이 열리면 즉시 알려드립니다.`);
   
-  // 최초 체크 및 주기적 실행
   checkCGV();
   setInterval(checkCGV, CONFIG.intervalSeconds * 1000);
 });
