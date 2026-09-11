@@ -1,0 +1,16 @@
+{
+  "name": "cgv-yongsan-imax-alert",
+  "version": "1.0.0",
+  "description": "24/7 CGV Yongsan IMAX ticket opening detector with Telegram alerts",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "cloud": "node cloud_monitor.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["cgv", "imax", "yongsan", "alert", "telegram"],
+  "author": "",
+  "license": "ISC"
+}
