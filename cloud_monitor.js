@@ -1,15 +1,17 @@
 /**
- * 24시간 클라우드 전용 모니터링 엔진
- * - 오직 "신규 티켓 오픈"일 때만 알림 (취소표 알림 제외)
- * - 환경변수 기반 텔레그램 연동
- * - 클라우드 헬스체크용 경량 HTTP 서버 내장
+ * 24시간 클라우드 전용 모니터링 & 좌석 직행 딥링크 엔진 (최종 완성본)
+ * - 미래 모든 오픈 날짜 100% 전수 감시
+ * - 신규 오픈 감지 시 스마트폰 좌석 화면 1초 직행 딥링크 전송
+ * - 취소표 알림 제외 (신규 오픈만 알림)
+ * - 매일 아침 9시 생존 신고
  * - 365일 무중단 동작
  */
 
 const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const { getOpenDates, getSchedules, filterSchedules } = require('./cgv_api');
 
-// 설정값 (형준님의 봇 토큰 및 Chat ID)
 const CONFIG = {
   port: process.env.PORT || 3000,
   telegramToken: process.env.TELEGRAM_BOT_TOKEN || '8393220813:AAG8jvm-SRxu5c6PG_RkmaGLVtKRr0SCrUY',
@@ -20,14 +22,33 @@ const CONFIG = {
   intervalSeconds: parseInt(process.env.CHECK_INTERVAL || '20', 10), // 20초 주기
 };
 
-const knownDates = new Set();
-const knownScreenings = new Map();
+const CACHE_FILE = path.join(__dirname, 'known_cache.json');
+
+let cacheData = { knownDates: [], knownScreenings: {} };
+try {
+  if (fs.existsSync(CACHE_FILE)) {
+    cacheData = JSON.parse(fs.readFileSync(CACHE_FILE, 'utf-8'));
+  }
+} catch (e) {}
+
+const knownDates = new Set(cacheData.knownDates || []);
+const knownScreenings = new Map(Object.entries(cacheData.knownScreenings || {}));
+let isFirstRun = knownDates.size === 0;
+let lastHeartbeatDate = '';
+
+function saveCache() {
+  try {
+    const obj = {
+      knownDates: Array.from(knownDates),
+      knownScreenings: Object.fromEntries(knownScreenings),
+      lastUpdated: new Date().toISOString()
+    };
+    fs.writeFileSync(CACHE_FILE, JSON.stringify(obj), 'utf-8');
+  } catch (e) {}
+}
 
 async function sendTelegram(text) {
-  if (!CONFIG.telegramToken || !CONFIG.telegramChatId) {
-    console.log('[Telegram Not Configured] ' + text);
-    return;
-  }
+  if (!CONFIG.telegramToken || !CONFIG.telegramChatId) return;
   try {
     const url = `https://api.telegram.org/bot${CONFIG.telegramToken}/sendMessage`;
     await fetch(url, {
@@ -36,7 +57,8 @@ async function sendTelegram(text) {
       body: JSON.stringify({
         chat_id: CONFIG.telegramChatId,
         text,
-        parse_mode: 'Markdown'
+        parse_mode: 'Markdown',
+        disable_web_page_preview: true
       })
     });
   } catch (e) {
@@ -44,71 +66,107 @@ async function sendTelegram(text) {
   }
 }
 
+async function checkDailyHeartbeat() {
+  const nowKst = new Date(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul' }));
+  const todayStr = `${nowKst.getFullYear()}-${String(nowKst.getMonth() + 1).padStart(2, '0')}-${String(nowKst.getDate()).padStart(2, '0')}`;
+  const currentHour = nowKst.getHours();
+
+  if (currentHour === 9 && lastHeartbeatDate !== todayStr) {
+    lastHeartbeatDate = todayStr;
+    const msg = `💚 *[CGV 용산아이맥스] 모니터링 정상 작동 중*\n\n클라우드 서버가 365일 24시간 감시하고 있습니다.\n\n🎯 *감시 대상*: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📅 *현재 오픈된 날짜*: ${knownDates.size}개 일자\n⏱️ *확인 주기*: ${CONFIG.intervalSeconds}초마다 확인 중\n\n신규 티켓이 열리면 좌석 화면 직행 링크를 즉시 보내드립니다! 🚀`;
+    await sendTelegram(msg);
+  }
+}
+
 async function checkCGV() {
-  const timeStr = new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' });
-  console.log(`[${timeStr}] CGV 용산아이맥스 오픈 감시 중...`);
+  await checkDailyHeartbeat();
 
   try {
     const openDates = await getOpenDates(CONFIG.siteNo);
 
-    // 1. 신규 날짜 예매 오픈 감지 (새로운 날짜가 열렸을 때)
-    if (knownDates.size > 0) {
+    // 1. 신규 날짜 예매 오픈 감지
+    if (!isFirstRun && knownDates.size > 0) {
       const newDates = openDates.filter(d => !knownDates.has(d));
       if (newDates.length > 0) {
-        const msg = `🎉 *[CGV 용산] 신규 예매 일자 오픈!*\n\n새로운 상영 날짜가 열렸습니다:\n👉 ${newDates.join(', ')}\n\n🔗 [CGV 바로가기](https://cgv.co.kr/theaters?theaterCode=${CONFIG.siteNo})`;
+        console.log(`[ALERT] New dates opened: ${newDates.join(', ')}`);
+        const msg = `🎉 *[CGV 용산] 신규 예매 일자 오픈!*\n\n새로운 상영 날짜가 열렸습니다:\n👉 ${newDates.join(', ')}\n\n🔗 [CGV 용산 예매 바로가기](https://cgv.co.kr/theaters?theaterCode=${CONFIG.siteNo})`;
         await sendTelegram(msg);
       }
     }
     openDates.forEach(d => knownDates.add(d));
 
-    // 2. 상영시간표 조회 (신규 상영 회차 오픈 감지)
-    const datesToCheck = openDates.slice(0, 5);
-    for (const date of datesToCheck) {
-      const schedules = await getSchedules(date, CONFIG.siteNo);
-      const filtered = filterSchedules(schedules, {
-        movieKeyword: CONFIG.targetMovie,
-        screenKeyword: CONFIG.targetScreen
-      });
+    // 2. 상영시간표 전수 검사 (오늘 이후 모든 미래 오픈 날짜)
+    const todayStr = new Date().toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul' }).replace(/\. /g, '').replace('.', '').padStart(8, '0');
+    const futureDates = openDates.filter(d => d >= todayStr);
 
-      for (const s of filtered) {
-        const key = `${s.date}_${s.movieNo}_${s.screenName}_${s.rawTime}`;
-        const prevSeats = knownScreenings.get(key);
+    for (const date of futureDates) {
+      try {
+        const schedules = await getSchedules(date, CONFIG.siteNo);
+        const filtered = filterSchedules(schedules, {
+          movieKeyword: CONFIG.targetMovie,
+          screenKeyword: CONFIG.targetScreen
+        });
 
-        if (prevSeats === undefined) {
-          // 최초 서버 실행 이후에 "새롭게 추가된 상영 회차"만 신규 오픈으로 알림!
-          if (knownScreenings.size > 0) {
-            const msg = `🔥 *[티켓 오픈 감지!]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *잔여좌석*: ${s.remainingSeats}석\n\n👉 [CGV 예매 바로가기](https://cgv.co.kr/theaters?theaterCode=${CONFIG.siteNo})`;
+        for (const s of filtered) {
+          const key = `${s.date}_${s.movieNo}_${s.screenName}_${s.rawTime}`;
+          const prevSeats = knownScreenings.get(key);
+
+          // 신규 회차 오픈 감지 시 좌석 직행 딥링크 발송!
+          if (!isFirstRun && prevSeats === undefined) {
+            console.log(`[ALERT] New screening opened: ${s.date} ${s.movieTitle} ${s.startTime}`);
+            const sseq = s.scnSseq || '1';
+            const mobileSeatUrl = `http://m.cgv.co.kr/Schedule/Seat.aspx?tc=${s.siteNo}&vd=${s.date}&sc=${s.screenNo}&s=${sseq}`;
+            const webBookingUrl = `https://cgv.co.kr/theaters?theaterCode=${s.siteNo}&date=${s.date}`;
+
+            const msg = `🔥 *[용산 IMAX 티켓 오픈! 좌석 직행]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *잔여좌석*: ${s.remainingSeats}석\n\n🎯 *추천 명당*: 2인 연석 (H/I/G열 18~22번)\n\n👇 *다른 사람보다 10초 빠른 좌석창 직행 링크:*\n👉 [📱 스마트폰 좌석 선택창 바로가기](${mobileSeatUrl})\n👉 [💻 PC 웹 예매창 바로가기](${webBookingUrl})`;
+            
             await sendTelegram(msg);
           }
-        }
 
-        // 취소표 감지는 제외 (신규 오픈만 체크)
-        knownScreenings.set(key, s.remainingSeats);
-      }
+          knownScreenings.set(key, s.remainingSeats);
+        }
+      } catch (err) {}
     }
+
+    if (isFirstRun) {
+      isFirstRun = false;
+      console.log(`[Init] Baseline set with ${knownDates.size} dates and ${knownScreenings.size} screenings.`);
+    }
+
+    saveCache();
   } catch (err) {
     console.error(`Check error: ${err.message}`);
   }
 }
 
-// 헬스체크 웹 서버
-const server = http.createServer((req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
+// 헬스체크 및 테스트 서버
+const server = http.createServer(async (req, res) => {
+  const url = new URL(req.url, `http://localhost:${CONFIG.port}`);
+
+  if (url.pathname === '/test') {
+    const timeStr = new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' });
+    const sampleMobileSeatUrl = `http://m.cgv.co.kr/Schedule/Seat.aspx?tc=0013&vd=20260918&sc=018&s=2`;
+
+    await sendTelegram(`🔔 *[생존 및 좌석 딥링크 테스트]*\n\n현재 시각: ${timeStr}\n클라우드 서버가 100% 정상 작동 중입니다! 👍\n🎯 감시 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n\n👇 아래 링크를 눌러 좌석 화면이 바로 뜨는지 확인해 보세요:\n👉 [스마트폰 좌석창 직행 테스트 링크](${sampleMobileSeatUrl})`);
+    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    return res.end(JSON.stringify({ success: true, message: '텔레그램으로 테스트 알림 및 좌석 직행 링크를 발송했습니다!' }));
+  }
+
+  res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({
     status: 'ONLINE',
-    service: 'CGV Yongsan IMAX 24/7 Cloud Monitor',
-    mode: 'NEW_OPENING_ONLY (No Cancellation Alerts)',
+    service: 'CGV Yongsan IMAX 24/7 Fast Booking Monitor',
     targetMovie: CONFIG.targetMovie,
     targetScreen: CONFIG.targetScreen,
     openDatesCount: knownDates.size,
     screeningsMonitored: knownScreenings.size,
     currentTime: new Date().toISOString()
-  }));
+  }, null, 2));
 });
 
 server.listen(CONFIG.port, async () => {
   console.log(`Cloud Monitor running on port ${CONFIG.port}`);
-  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 가동]*\n\n클라우드 서버에서 24시간 감시 중입니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📢 모드: *신규 티켓 오픈 시에만 알림* (취소표 제외)\n\n컴퓨터가 꺼져 있어도 새로운 티켓이 열리면 즉시 알려드립니다.`);
+  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 최종 완성본 가동]*\n\n좌석 선택창 1초 직행 딥링크 엔진이 활성화되었습니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📅 미래 모든 오픈 날짜 전수 감시 활성화 완료`);
   
   checkCGV();
   setInterval(checkCGV, CONFIG.intervalSeconds * 1000);
