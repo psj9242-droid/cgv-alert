@@ -1,10 +1,10 @@
 /**
- * 24시간 클라우드 전용 모니터링 & 좌석 직행 딥링크 엔진 (최종 완성본)
- * - 미래 모든 오픈 날짜 100% 전수 감시
- * - 신규 오픈 감지 시 스마트폰 좌석 화면 1초 직행 딥링크 전송
- * - 취소표 알림 제외 (신규 오픈만 알림)
+ * 24시간 클라우드 전용 모니터링 & 스마트 취소표 감지 엔진 (V4)
+ * - 신규 티켓 오픈 100% 실시간 감지
+ * - [신규] 매진/인기 회차에서 "명당 취소표(+1~2석)" 발생 시 스마트 필터링 알림
+ * - 스마트폰 좌석 화면 1초 직행 딥링크 탑재
+ * - 미래 모든 오픈 날짜 전수 감시
  * - 매일 아침 9시 생존 신고
- * - 365일 무중단 동작
  */
 
 const http = require('http');
@@ -73,7 +73,7 @@ async function checkDailyHeartbeat() {
 
   if (currentHour === 9 && lastHeartbeatDate !== todayStr) {
     lastHeartbeatDate = todayStr;
-    const msg = `💚 *[CGV 용산아이맥스] 모니터링 정상 작동 중*\n\n클라우드 서버가 365일 24시간 감시하고 있습니다.\n\n🎯 *감시 대상*: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📅 *현재 오픈된 날짜*: ${knownDates.size}개 일자\n⏱️ *확인 주기*: ${CONFIG.intervalSeconds}초마다 확인 중\n\n신규 티켓이 열리면 좌석 화면 직행 링크를 즉시 보내드립니다! 🚀`;
+    const msg = `💚 *[CGV 용산아이맥스] 모니터링 정상 작동 중*\n\n클라우드 서버가 365일 24시간 감시하고 있습니다.\n\n🎯 *감시 대상*: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📅 *현재 오픈된 날짜*: ${knownDates.size}개 일자\n⏱️ *확인 주기*: ${CONFIG.intervalSeconds}초마다 확인 중\n\n신규 오픈 및 명당 취소표 감시가 활성화되어 있습니다! 🚀`;
     await sendTelegram(msg);
   }
 }
@@ -111,15 +111,21 @@ async function checkCGV() {
           const key = `${s.date}_${s.movieNo}_${s.screenName}_${s.rawTime}`;
           const prevSeats = knownScreenings.get(key);
 
-          // 신규 회차 오픈 감지 시 좌석 직행 딥링크 발송!
-          if (!isFirstRun && prevSeats === undefined) {
-            console.log(`[ALERT] New screening opened: ${s.date} ${s.movieTitle} ${s.startTime}`);
-            const sseq = s.scnSseq || '1';
-            const mobileSeatUrl = `http://m.cgv.co.kr/Schedule/Seat.aspx?tc=${s.siteNo}&vd=${s.date}&sc=${s.screenNo}&s=${sseq}`;
-            const webBookingUrl = `https://cgv.co.kr/theaters?theaterCode=${s.siteNo}&date=${s.date}`;
+          const sseq = s.scnSseq || '1';
+          const mobileSeatUrl = `http://m.cgv.co.kr/Schedule/Seat.aspx?tc=${s.siteNo}&vd=${s.date}&sc=${s.screenNo}&s=${sseq}`;
+          const webBookingUrl = `https://cgv.co.kr/theaters?theaterCode=${s.siteNo}&date=${s.date}`;
 
-            const msg = `🔥 *[용산 IMAX 티켓 오픈! 좌석 직행]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *잔여좌석*: ${s.remainingSeats}석\n\n🎯 *추천 명당*: 2인 연석 (H/I/G열 18~22번)\n\n👇 *다른 사람보다 10초 빠른 좌석창 직행 링크:*\n👉 [📱 스마트폰 좌석 선택창 바로가기](${mobileSeatUrl})\n👉 [💻 PC 웹 예매창 바로가기](${webBookingUrl})`;
-            
+          // [A] 신규 회차 오픈 감지
+          if (!isFirstRun && prevSeats === undefined) {
+            console.log(`[ALERT] New screening: ${s.date} ${s.movieTitle} ${s.startTime}`);
+            const msg = `🔥 *[용산 IMAX 신규 티켓 오픈!]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *잔여좌석*: ${s.remainingSeats}석\n\n🎯 *추천 명당*: 2인 연석 (H/I/G열 18~22번)\n\n👇 *1초 좌석창 직행 링크:*\n👉 [📱 스마트폰 좌석 선택창 바로가기](${mobileSeatUrl})\n👉 [💻 PC 웹 예매창 바로가기](${webBookingUrl})`;
+            await sendTelegram(msg);
+          }
+          // [B] 스마트 명당 취소표 감지 (매진 또는 4석 이하 꽉 찬 인기 회차에서 취소표 발생 시)
+          else if (!isFirstRun && prevSeats !== undefined && s.remainingSeats > prevSeats && prevSeats <= 4) {
+            const addedSeats = s.remainingSeats - prevSeats;
+            console.log(`[ALERT] Cancelled seats: ${s.date} ${s.startTime} (+${addedSeats} seats)`);
+            const msg = `✨ *[용산 IMAX 꿀자리 취소표 발생!]*\n\n🎬 *영화*: ${s.movieTitle}\n📅 *날짜*: ${s.date}\n⏰ *시간*: ${s.startTime} ~ ${s.endTime}\n🏛️ *상영관*: ${s.screenName}\n🎟️ *취소표*: *+${addedSeats}석* 발생! (현재 총 ${s.remainingSeats}석)\n\n💡 *매진되었던 인기 회차에서 풀린 취소표입니다. 명당자리일 확률이 매우 높습니다!*\n\n👇 *남들보다 먼저 낚아채는 좌석창 직행:*\n👉 [📱 스마트폰 좌석 선택창 바로가기](${mobileSeatUrl})\n👉 [💻 PC 웹 예매창 바로가기](${webBookingUrl})`;
             await sendTelegram(msg);
           }
 
@@ -147,7 +153,7 @@ const server = http.createServer(async (req, res) => {
     const timeStr = new Date().toLocaleTimeString('ko-KR', { timeZone: 'Asia/Seoul' });
     const sampleMobileSeatUrl = `http://m.cgv.co.kr/Schedule/Seat.aspx?tc=0013&vd=20260918&sc=018&s=2`;
 
-    await sendTelegram(`🔔 *[생존 및 좌석 딥링크 테스트]*\n\n현재 시각: ${timeStr}\n클라우드 서버가 100% 정상 작동 중입니다! 👍\n🎯 감시 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n\n👇 아래 링크를 눌러 좌석 화면이 바로 뜨는지 확인해 보세요:\n👉 [스마트폰 좌석창 직행 테스트 링크](${sampleMobileSeatUrl})`);
+    await sendTelegram(`🔔 *[생존 및 좌석 딥링크 테스트]*\n\n현재 시각: ${timeStr}\n클라우드 서버가 100% 정상 작동 중입니다! 👍\n🎯 감시 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n✨ 스마트 꿀자리 취소표 감지 활성화 완료\n\n👇 아래 링크를 눌러 좌석 화면이 바로 뜨는지 확인해 보세요:\n👉 [스마트폰 좌석창 직행 테스트 링크](${sampleMobileSeatUrl})`);
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     return res.end(JSON.stringify({ success: true, message: '텔레그램으로 테스트 알림 및 좌석 직행 링크를 발송했습니다!' }));
   }
@@ -155,7 +161,7 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
   res.end(JSON.stringify({
     status: 'ONLINE',
-    service: 'CGV Yongsan IMAX 24/7 Fast Booking Monitor',
+    service: 'CGV Yongsan IMAX 24/7 Smart Cancel & Fast Booking Monitor V4',
     targetMovie: CONFIG.targetMovie,
     targetScreen: CONFIG.targetScreen,
     openDatesCount: knownDates.size,
@@ -166,7 +172,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(CONFIG.port, async () => {
   console.log(`Cloud Monitor running on port ${CONFIG.port}`);
-  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 최종 완성본 가동]*\n\n좌석 선택창 1초 직행 딥링크 엔진이 활성화되었습니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n📅 미래 모든 오픈 날짜 전수 감시 활성화 완료`);
+  await sendTelegram(`🚀 *[CGV 용산아이맥스 알리미 V4 가동]*\n\n신규 티켓 오픈 + 꿀자리 취소표 스마트 감지가 시작되었습니다!\n🎯 대상: ${CONFIG.targetMovie} (${CONFIG.targetScreen})\n✨ 매진 회차에서 취소표 발생 시 즉시 좌석창 직행 링크 발송`);
   
   checkCGV();
   setInterval(checkCGV, CONFIG.intervalSeconds * 1000);
